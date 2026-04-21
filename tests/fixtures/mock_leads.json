@@ -1,0 +1,78 @@
+[
+  {
+    "brand_name": "GlowUp Skincare",
+    "niche": "skincare",
+    "company_size": "startup",
+    "intent_signal": "Recently raised Series A of $5M for DTC expansion",
+    "intent_tier": "hot",
+    "confidence": 0.92,
+    "icebreaker_pitch": "Saw your Series A announcement — as you scale DTC, creator partnerships could 3x your ROAS vs. paid ads.",
+    "source": "pr_newswire",
+    "contact_email": "sarah@glowupskincare.com",
+    "domain": "glowupskincare.com"
+  },
+  {
+    "brand_name": "FitFuel Supplements",
+    "niche": "supplements",
+    "company_size": "small",
+    "intent_signal": "Hiring influencer marketing manager on Greenhouse",
+    "intent_tier": "hot",
+    "confidence": 0.88,
+    "icebreaker_pitch": "Noticed you're hiring an influencer manager — I'd love to be one of the first creators in your program.",
+    "source": "ats_jobs_greenhouse",
+    "contact_email": "mike@fitfuel.com",
+    "domain": "fitfuel.com"
+  },
+  {
+    "brand_name": "NovaTech SaaS",
+    "niche": "SaaS",
+    "company_size": "medium",
+    "intent_signal": "Running 45+ active Meta ads targeting US market",
+    "intent_tier": "warm",
+    "confidence": 0.75,
+    "icebreaker_pitch": "Your Meta ad spend is aggressive — creator content typically cuts CPA by 40% vs. brand-produced ads.",
+    "source": "meta_ads",
+    "contact_email": "julia@novatech.io",
+    "domain": "novatech.io"
+  },
+  {
+    "brand_name": "",
+    "niche": "unknown",
+    "company_size": null,
+    "intent_signal": null,
+    "intent_tier": "cold",
+    "confidence": 0.1,
+    "icebreaker_pitch": "Hope this email finds you well!",
+    "source": "reddit_oauth"
+  },
+  {
+    "brand_name": "Google",
+    "niche": "tech",
+    "company_size": "enterprise",
+    "intent_signal": "Hiring creator partnerships lead",
+    "intent_tier": "hot",
+    "confidence": 0.95,
+    "icebreaker_pitch": "Saw your creator partnerships role — would love to discuss.",
+    "source": "ats_jobs_lever"
+  },
+  {
+    "brand_name": "company",
+    "niche": "general",
+    "company_size": "startup",
+    "intent_signal": "Some vague signal",
+    "intent_tier": "cold",
+    "confidence": 0.8,
+    "icebreaker_pitch": "Let's work together!",
+    "source": "pr_newswire"
+  },
+  {
+    "brand_name": "https://example.com",
+    "niche": "tech",
+    "company_size": "startup",
+    "intent_signal": "Active funding",
+    "intent_tier": "warm",
+    "confidence": 0.7,
+    "icebreaker_pitch": "Saw your recent funding round and creator job listing.",
+    "source": "pr_newswire"
+  }
+]

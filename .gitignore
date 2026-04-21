@@ -1,0 +1,27 @@
+# ── Environment & Secrets ──────────────────────────────
+.env
+
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Testing ────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── IDE ────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ─────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
