@@ -16,32 +16,39 @@ from config import (
     SCRAPER_TIMEOUT,
     JOBSPY_RESULTS_WANTED,
     JOBSPY_HOURS_OLD,
+    DEEP_SCRAPE_ENABLED,
 )
 from scrapers.base import BaseScraper, RawLead
+from scrapers.polite_scraper import scrape_article
 
 logger = logging.getLogger("closr.scrapers.ats_jobs")
 
 # ── Jobspy Configuration ──────────────────────────────────
-JOBSPY_SEARCH_QUERY = '"influencer marketing" OR "UGC creator" OR "creator partnerships"'
+# Broadened to catch affiliate managers and KOL (Key Opinion Leader) roles, 
+# which are massive in the DTC space right now.
+JOBSPY_SEARCH_QUERY = '("influencer marketing" OR "UGC" OR "creator partnerships" OR "affiliate manager" OR "social commerce" OR "KOL")'
 JOBSPY_SITES = ["linkedin", "indeed"]
 
 # ── Public ATS Board Slugs ────────────────────────────────
-# Companies known to use Greenhouse/Lever with creator-economy roles.
-# These are public board slugs — no authentication required.
+# Dumped the massive unicorns. Replaced with aggressive, mid-stage 
+# DTC/SaaS brands that actually respond to cold creator pitches.
 GREENHOUSE_SLUGS = [
-    "glossier", "hims", "thereareal", "allbirds", "warbyparker",
-    "casper", "bombas", "away", "outdoorvoices", "renttherunway",
+    "liquiddeath", "drinkolipop", "magicspoon", "manscaped", "trueclassic",
+    "kagedmuscle", "gymshark", "beasthealth", "gfuel", "ridge"
 ]
 
 LEVER_SLUGS = [
-    "goop", "fabletics", "nativecos", "quip", "brooklinen",
-    "ritual", "hungryroot", "harrys", "thirdlove", "rothy",
+    "mudwtr", "huel", "athleticgreens", "pennys", "chubbies",
+    "solgaard", "blueland", "vessi", "casetify", "nomad"
 ]
 
 # Keywords that indicate creator/influencer marketing roles
+# Added community and affiliate keywords, as modern startups roll 
+# creator sponsorships into those departments.
 CREATOR_JOB_KEYWORDS = [
     "influencer", "creator", "ugc", "ambassador",
     "partnerships", "talent", "content creator",
+    "affiliate", "kol", "community manager", "evangelist"
 ]
 
 
@@ -106,12 +113,14 @@ class ATSJobsScraper(BaseScraper):
                 for _, row in jobs.iterrows():
                     title = str(row.get("title", ""))
                     company = str(row.get("company", ""))
-                    description = str(row.get("description", ""))[:500]
+                    description = str(row.get("description", ""))  # No cap — LLM needs full context
                     job_url = str(row.get("job_url", ""))
+                    location = str(row.get("location", ""))
 
                     raw_text = (
                         f"Company: {company}\n"
                         f"Job Title: {title}\n"
+                        f"Location: {location}\n"
                         f"Description: {description}"
                     )
 
@@ -170,6 +179,17 @@ class ATSJobsScraper(BaseScraper):
                 f"Source: Greenhouse ATS"
             )
 
+            # ── Deep Scrape Injection ──
+            if DEEP_SCRAPE_ENABLED and job_url:
+                try:
+                    chunks = scrape_article(job_url)
+                    if chunks:
+                        logger.debug(f"Deep Scrape Success: {job_url}")
+                        full_text = "\n\n".join(chunks)
+                        raw_text += f"\n\nFull Posting:\n{full_text}"
+                except Exception as e:
+                    logger.debug(f"Deep scrape failed for {job_url}, falling back to summary: {e}")
+
             results.append(
                 RawLead(
                     source=f"{self.source_name}_greenhouse",
@@ -219,6 +239,17 @@ class ATSJobsScraper(BaseScraper):
                 f"Location: {location}\n"
                 f"Source: Lever ATS"
             )
+
+            # ── Deep Scrape Injection ──
+            if DEEP_SCRAPE_ENABLED and posting_url:
+                try:
+                    chunks = scrape_article(posting_url)
+                    if chunks:
+                        logger.debug(f"Deep Scrape Success: {posting_url}")
+                        full_text = "\n\n".join(chunks)
+                        raw_text += f"\n\nFull Posting:\n{full_text}"
+                except Exception as e:
+                    logger.debug(f"Deep scrape failed for {posting_url}, falling back to summary: {e}")
 
             results.append(
                 RawLead(

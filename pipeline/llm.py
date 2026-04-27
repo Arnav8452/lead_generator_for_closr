@@ -1,7 +1,10 @@
 """
 Closr — LLM Extraction Pipeline (Ollama / Local)
-Sends scraped raw text to a local LLM for structured brand + intent extraction.
-Output is strict JSON conforming to the lead schema.
+Phase 1: Deep Semantic Extraction — extracts full entity graphs from unstructured text.
+
+Two-stage pipeline:
+  Stage A: Deep extraction via DEEP_EXTRACTION_PROMPT → structured JSON
+  Stage B: Embedding generation via pipeline.embedding (separate module)
 
 Uses Ollama's HTTP API — no external LLM costs.
 """
@@ -23,7 +26,73 @@ from config import (
 logger = logging.getLogger("closr.pipeline.llm")
 
 # ─────────────────────────────────────────────────────────
-# System Prompt — engineered for reliable JSON extraction
+# Deep Extraction Prompt — Phase 1 Entity & Signal Model
+# ─────────────────────────────────────────────────────────
+DEEP_EXTRACTION_PROMPT = """You are the "Closr Deep Intelligence Extractor", a B2B sales intelligence engine.
+You receive raw, unstructured text (news articles, press releases, job postings,
+social media threads, podcast descriptions) and you MUST extract ALL structured
+entities and signals from it.
+
+You MUST output ONLY valid JSON. No explanations, no markdown fences, no commentary.
+
+**EXTRACTION SCHEMA (JSON ONLY):**
+
+{
+    "company": {
+        "name": "The PRIMARY company spending money or hiring (proper case, no Inc/LLC/Ltd suffixes)",
+        "niche": "Industry vertical (e.g., skincare, SaaS, fintech, fitness, creator economy)",
+        "company_size": "Best estimate: startup | small | medium | enterprise"
+    },
+    "signal": {
+        "type": "One of: funding | hiring | expansion | product_launch | distress | ad_spend",
+        "headline": "One-line summary of the event (e.g., 'Series A $12M led by Sequoia')",
+        "summary": "2-3 sentence context explaining WHY this signal matters for outreach. Be specific about amounts, timelines, and strategic implications.",
+        "event_date": "ISO 8601 date if mentioned or inferable (e.g., '2026-04-22'). Use null if unknown."
+    },
+    "locations": [
+        {
+            "type": "hq | hiring | office | expansion",
+            "city": "City name or null",
+            "region": "State/Province or null",
+            "country": "Country name or null",
+            "raw": "Original location string as it appeared in the text"
+        }
+    ],
+    "contacts": [
+        {
+            "name": "First and Last name of ONE person. NEVER group multiple names. (e.g., 'Sarah Chen')",
+            "title": "Job title exactly as stated (e.g., 'VP of Growth')",
+            "context": "Why this person is relevant (e.g., 'quoted in the funding announcement', 'listed as hiring manager')"
+        }
+    ],
+    "strategic_context": [
+        "Each string is a specific, actionable insight extracted from the text.",
+        "Examples: 'Expanding European operations with Berlin office opening Q3 2026'",
+        "'Launching AI-powered skincare line targeting Gen Z'",
+        "'Founder expressed frustration with Meta ROAS declining 40% YoY'"
+    ],
+    "confidence": 0.85
+}
+
+**CRITICAL RULES:**
+1. `company.name` MUST be the actual brand/company — NOT a person, job board, news outlet, or platform name. Strip Inc/LLC/Ltd suffixes.
+2. If no clear company can be identified, return exactly: {}
+3. ONLY extract individuals who work directly for the target company in the target-department orbit (marketing, growth, creator partnerships, founders/CEOs).
+4. DO NOT extract the author, journalist, reporter, or publisher of the article.
+5. DO NOT extract investors, board members, or external PR contacts unless they are active founders.
+6. DO NOT extract names that are just job titles (e.g., "Director of Marketing") or social media usernames (e.g., names without spaces like "User123").
+7. NEVER group multiple people in a single contact object. If the text says "Founded by Dana and Shlomit", you MUST create TWO separate objects in the `contacts` array. No "and", "&", or commas in the name field. One person = one object.
+8. For each location, DISTINGUISH between HQ (where they're headquartered) and hiring/expansion locations (where budget is being deployed).
+9. `strategic_context` should contain insights a sales rep could use in a cold email. Be SPECIFIC — no generic statements.
+10. `event_date` should be an actual date. If the text says "yesterday" or "last week", infer the approximate date. If truly unknown, use null.
+11. confidence should be 0.8+ only if there is a clearly identifiable company with an actionable signal.
+12. For job postings: the company is the employer, signal type is "hiring", extract the job location as a "hiring" type location.
+13. For funding news: extract round type, amount, and lead investor in the headline. Extract founders/CEOs as contacts (they control the budget).
+14. NEVER output anything except the JSON object.
+15. REDDIT/STEALTH RULE: If the text is a Reddit post where the author is asking for advice but DOES NOT explicitly reveal their startup's name, DO NOT extract their Reddit username as the company. You MUST return exactly: {}"""
+
+# ─────────────────────────────────────────────────────────
+# Legacy Prompt (deprecated — kept for backward compat)
 # ─────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are the "Closr Economic Strategist & Data Validator", functioning as a B2B sales intelligence extraction engine. Your job is to analyze raw text from various sources (press releases, job postings, social media posts, ad data, podcast show notes) and extract structured lead data.
 
@@ -65,6 +134,38 @@ OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 
 # Maximum retries for LLM extraction (parse failures, timeouts)
 MAX_RETRIES = 2
+
+
+# ─────────────────────────────────────────────────────────
+# JSON Sanitization — handles Qwen hallucination artifacts
+# ─────────────────────────────────────────────────────────
+def _sanitize_llm_json(raw: str) -> str:
+    """
+    Sanitize raw LLM output before JSON parsing.
+    Handles common Qwen2.5 hallucination artifacts:
+    - Markdown code block wrappers (```json ... ```)
+    - Trailing commas before closing braces/brackets
+    - Unescaped newlines inside string values
+    - Leading/trailing text outside the JSON object
+    """
+    text = raw.strip()
+
+    # Strip markdown code block wrappers
+    if text.startswith("```"):
+        lines = text.split("\n")
+        start = 1 if lines[0].strip().startswith("```") else 0
+        end = len(lines)
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].strip() == "```":
+                end = i
+                break
+        text = "\n".join(lines[start:end]).strip()
+
+    # Remove trailing commas before } or ]
+    # e.g., {"key": "value",} → {"key": "value"}
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+
+    return text
 
 
 def _extract_json_by_braces(text: str) -> str | None:
@@ -111,8 +212,172 @@ def _extract_json_by_braces(text: str) -> str | None:
     return None
 
 
+# ─────────────────────────────────────────────────────────
+# Phase 1: Deep Entity Extraction
+# ─────────────────────────────────────────────────────────
+def extract_entities(raw_text: str, source: str) -> dict | None:
+    """
+    Send raw scraped text to the local LLM for deep entity extraction.
+    Returns the full entity graph (company, signal, locations, contacts,
+    strategic_context) or None if extraction fails.
+
+    Args:
+        raw_text: The raw text from a scraper.
+        source: The scraper source name for logging context.
+
+    Returns:
+        A dict matching the deep extraction schema, or None.
+    """
+    user_prompt = (
+        f"Source: {source}\n"
+        f"---\n"
+        f"{raw_text[:2000]}\n"  # Cap at 2000 — entities cluster in first paragraphs
+        f"---\n"
+        f"Extract ALL entities and signals as JSON."
+    )
+
+    # Dynamic context window: short inputs get 2048, deep-scraped get 4096
+    dynamic_ctx = 2048 if len(raw_text) < 1000 else OLLAMA_NUM_CTX
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                OLLAMA_CHAT_URL,
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": [
+                        {"role": "system", "content": DEEP_EXTRACTION_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "stream": False,
+                    "options": {
+                        "num_predict": 1024,
+                        "num_ctx": 4096,
+                        "temperature": OLLAMA_TEMPERATURE,
+                    },
+                },
+                timeout=OLLAMA_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            content = data.get("message", {}).get("content", "").strip()
+
+            if not content:
+                logger.warning(
+                    f"LLM: Empty response for source={source} "
+                    f"(attempt {attempt}/{MAX_RETRIES})"
+                )
+                continue
+
+            # Sanitize before parsing
+            sanitized = _sanitize_llm_json(content)
+
+            # Check for valid non-lead (empty JSON)
+            if sanitized.strip() in ("{}", "{ }"):
+                return None
+
+            # Parse the JSON output
+            entity = _parse_entity_json(sanitized)
+
+            # Detect macro-news: LLM parsed OK but company is empty
+            # (e.g., "Autonomous vehicles raised $21.4B" — no specific company)
+            # Don't waste a retry on this — it's correct behavior, not a parse failure.
+            if entity is None:
+                # Check if it's a valid JSON with empty company (macro-news)
+                # vs an actual parse failure (malformed JSON)
+                try:
+                    raw_parsed = json.loads(sanitized) if sanitized.strip().startswith("{") else None
+                    if raw_parsed is None:
+                        raw_json_str = _extract_json_by_braces(sanitized)
+                        if raw_json_str:
+                            raw_parsed = json.loads(re.sub(r',\s*([}\]])', r'\1', raw_json_str))
+                except (json.JSONDecodeError, TypeError):
+                    raw_parsed = None
+
+                if raw_parsed and isinstance(raw_parsed, dict):
+                    company_obj = raw_parsed.get("company", {})
+                    if not company_obj or not company_obj.get("name"):
+                        logger.debug(
+                            f"LLM: Macro-news detected (no specific company) "
+                            f"for source={source}. Skipping without retry."
+                        )
+                        return None  # Don't retry — this is correct LLM behavior
+
+                logger.warning(
+                    f"LLM: Failed to parse entity JSON on attempt "
+                    f"{attempt}/{MAX_RETRIES} for source={source}. "
+                    f"Raw: {content[:200]}"
+                )
+                continue
+
+            # Inject source metadata
+            entity["_source"] = source
+            entity["_raw_text"] = raw_text[:2000]
+
+            company_name = entity.get("company", {}).get("name", "Unknown")
+            logger.debug(
+                f"LLM: Deep-extracted '{company_name}' from {source} "
+                f"(confidence: {entity.get('confidence')})"
+            )
+            return entity
+
+        except requests.exceptions.Timeout:
+            logger.warning(
+                f"LLM: Timeout on attempt {attempt}/{MAX_RETRIES} "
+                f"for source={source}"
+            )
+        except requests.exceptions.ConnectionError:
+            logger.error(
+                f"LLM: Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
+                f"Is the Ollama server running?"
+            )
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"LLM: Request error for source={source}: {e}")
+            return None
+
+    logger.error(
+        f"LLM: All {MAX_RETRIES} attempts failed for source={source}"
+    )
+    return None
+
+
+def _parse_entity_json(text: str) -> dict | None:
+    """
+    Parse LLM output into a valid entity dict.
+    We no longer perform strict validation here — just ensure it parses
+    and has the 'company' root key. validator.py handles the rest.
+    """
+    # Try direct JSON parse first
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict) and "company" in result:
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: extract first complete JSON object via brace-counting
+    json_str = _extract_json_by_braces(text)
+    if json_str:
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+        try:
+            result = json.loads(json_str)
+            if isinstance(result, dict) and "company" in result:
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────
+# Legacy: Single-pass lead extraction (DEPRECATED)
+# Kept for backward compatibility during migration.
+# ─────────────────────────────────────────────────────────
 def extract_lead(raw_text: str, source: str) -> dict | None:
     """
+    DEPRECATED — Use extract_entities() for Phase 1.
     Send raw scraped text to the local LLM for structured lead extraction.
 
     Args:
@@ -142,7 +407,8 @@ def extract_lead(raw_text: str, source: str) -> dict | None:
                     ],
                     "stream": False,
                     "options": {
-                        "num_ctx": OLLAMA_NUM_CTX,
+                        "num_predict": 1024,
+                        "num_ctx": 4096,
                         "temperature": OLLAMA_TEMPERATURE,
                     },
                 },
@@ -210,77 +476,28 @@ def extract_lead(raw_text: str, source: str) -> dict | None:
 
 def _parse_llm_json(text: str) -> dict | None:
     """
-    Parse LLM output into a valid lead dict. Handles common LLM quirks:
-    - Markdown code blocks (```json ... ```)
-    - Leading/trailing whitespace or text
-    - Nested JSON objects
-    - Missing or extra fields
+    DEPRECATED
     """
-    # Strip markdown code block wrappers if present
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        # Remove opening ```json or ``` line
-        lines = cleaned.split("\n")
-        # Find the first and last ``` lines
-        start = 0
-        end = len(lines)
-        for i, line in enumerate(lines):
-            if line.strip().startswith("```") and i == 0:
-                start = i + 1
-            elif line.strip() == "```":
-                end = i
-                break
-        cleaned = "\n".join(lines[start:end]).strip()
+    # Sanitize first
+    cleaned = _sanitize_llm_json(text)
 
     # Try direct JSON parse first
     try:
         result = json.loads(cleaned)
         if isinstance(result, dict):
-            return _validate_lead_schema(result)
+            return result
     except json.JSONDecodeError:
         pass
 
     # Fallback: extract first complete JSON object via brace-counting
     json_str = _extract_json_by_braces(text)
     if json_str:
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
         try:
             result = json.loads(json_str)
             if isinstance(result, dict):
-                return _validate_lead_schema(result)
+                return result
         except json.JSONDecodeError:
             pass
 
     return None
-
-
-def _validate_lead_schema(data: dict) -> dict | None:
-    """
-    Ensure the LLM output has the required fields with correct types.
-    Returns a cleaned dict or None if critically malformed.
-    """
-    required = ["brand_name", "confidence"]
-
-    for field in required:
-        if field not in data:
-            return None
-
-    # Coerce confidence to float
-    try:
-        data["confidence"] = float(data["confidence"])
-    except (ValueError, TypeError):
-        data["confidence"] = 0.0
-
-    # Ensure all expected string fields exist (with defaults)
-    defaults = {
-        "niche": None,
-        "company_size": None,
-        "intent_signal": None,
-        "intent_tier": "cold",
-        "decision_maker_name": None,
-        "icebreaker_pitch": None,
-    }
-    for field, default in defaults.items():
-        if field not in data:
-            data[field] = default
-
-    return data

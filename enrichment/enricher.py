@@ -4,29 +4,6 @@ Closr Lead Enrichment — Title-Filtered API Waterfall
 import requests
 import time
 
-# ── Role targeting config by lead segment ─────────────────────────────────────
-CLOSR_TARGET_TITLES = {
-    "dtc_beauty": [
-        "Head of Influencer", "Director of Influencer", "VP of Growth",
-        "Head of Growth", "Creator Partnerships", "CMO", "VP Marketing",
-        "Founder", "Co-Founder", "CEO" # FIX: Added founder titles
-    ],
-    "saas_funded": [
-        "VP Marketing", "Head of Marketing", "VP Demand Gen", 
-        "Director of Marketing", "CMO", "Head of Growth", 
-        "Founder", "Co-Founder", "CEO" # FIX: Seed-stage decision makers
-    ],
-    "ats_signal": [
-        # For ATS jobs, we still want the specific hiring manager if possible
-        "Head of Influencer", "Director of Influencer", "Influencer Marketing Manager",
-        "Creator Partnerships", "VP Marketing", "Founder", "CEO"
-    ],
-    "creator_native": [
-        "Head of Creator Partnerships", "VP Creator", "Director of Creator Success",
-        "Founder", "Co-Founder", "CEO"
-    ],
-}
-
 # Seniority fallback order — stop at first match
 SENIORITY_PRIORITY = ["Director", "Vice President", "C-Suite", "Founder", "Owner"]
 
@@ -34,9 +11,10 @@ SKIP_SEGMENTS = ["enterprise_large"]
 
 from utils.domain_resolver import resolve_domain
 from enrichment.hunter import hunter_named_lookup, hunter_title_search
-from enrichment.snov import snov_title_search
-from enrichment.prospeo import prospeo_title_search
-from config import HUNTER_API_KEY, SNOV_CLIENT_ID, SNOV_CLIENT_SECRET, PROSPEO_API_KEY
+from enrichment.snov import snov_named_lookup, snov_title_search
+from enrichment.prospeo import prospeo_named_lookup, prospeo_title_search
+from enrichment.apollo import apollo_linkedin_lookup, apollo_named_lookup as apollo_named
+from config import CLOSR_TARGET_TITLES
 
 # ── SEGMENT CLASSIFIER ─────────────────────────────────────────────────────────
 def classify_segment(lead: dict) -> str:
@@ -50,62 +28,109 @@ def classify_segment(lead: dict) -> str:
 
     if any(k in niche for k in ["beauty", "skincare", "dtc", "fashion", "apparel", "food", "beverage", "consumer"]):
         return "dtc_beauty"
-    if any(k in niche for k in ["creator", "influencer", "media", "music", "entertainment"]):
-        return "creator_native"
-    if "hiring" in signal or "looking for" in signal:
-        return "ats_signal"
-    return "saas_funded"
+    if any(k in niche for k in ["saas", "software", "tech", "platform"]):
+        return "saas"
+    if any(k in niche for k in ["fitness", "wellness", "health", "supplement"]):
+        return "health_wellness"
+    
+    return "general"
 
-# ── WATERFALL ORCHESTRATOR ────────────────────────────────────────────────────
-def enrich_lead(lead: dict, config: dict = None, quota_manager=None) -> dict:
+# ── ENRICHMENT PIPELINE ────────────────────────────────────────────────────────
+def enrich_lead(lead: dict, force_department: str = None, quota_manager=None) -> dict:
+    """
+    Waterfalls through API providers (Hunter -> Snov -> Prospeo) 
+    using securely rotated keys from the QuotaManager.
+    """
     domain = lead.get("domain")
+    company_name = lead.get("brand_name")
     
+    if not domain and company_name:
+        domain = resolve_domain(company_name, niche=lead.get("niche"))
+        if domain:
+            lead["domain"] = domain
+            
     if not domain:
-        return {**lead, "contact_email": None, "reason": "no_domain_resolved"}
-    
-    segment = classify_segment(lead)
-    lead["segment"] = segment
+        return {**lead, "contact_email": None, "reason": "no_domain"}
 
+    segment = classify_segment(lead)
+    
     if segment in SKIP_SEGMENTS:
-        return {**lead, "contact_email": None, "reason": "enterprise_skipped"}
+        return {**lead, "contact_email": None, "reason": "segment_skipped"}
 
     result = None
-    force_department = config.get("force_department") if config else None
 
-    # We rely on our existing global config constants instead of passing a dict
-    
-    # 1. Named Lookup Shortcut (Highest Accuracy)
-    first = lead.get("known_first_name")
-    last = lead.get("known_last_name")
-    if first and last and quota_manager and quota_manager.can_use("hunter"):
-        result = hunter_named_lookup(domain, first, last, HUNTER_API_KEY)
-        if result and result.get("verified"):
-            quota_manager.consume("hunter")
+    # Determine if we know exactly who we are looking for
+    first = lead.get("known_first_name", "")
+    last = lead.get("known_last_name", "")
+    linkedin_url = lead.get("known_linkedin_url", "")
 
-    # 2. Waterfall: Hunter → Snov → Prospeo
-    if not result and quota_manager and quota_manager.can_use("hunter"):
-        result = hunter_title_search(domain, segment, HUNTER_API_KEY, force_department=force_department)
-        if result and result.get("verified"):
-            quota_manager.consume("hunter")
+    # 0. PROSPEO LINKEDIN (highest fidelity — always try first if URL is known)
+    if linkedin_url and not result and quota_manager:
+        from enrichment.prospeo import prospeo_linkedin_lookup
+        prospeo_key = quota_manager.get_prospeo_key()
+        if prospeo_key:
+            result = prospeo_linkedin_lookup(linkedin_url, prospeo_key)
+
+    # 0b. APOLLO LINKEDIN (second highest fidelity — try if Prospeo missed)
+    if linkedin_url and not result and quota_manager:
+        apollo_key = quota_manager.get_apollo_key()
+        if apollo_key:
+            result = apollo_linkedin_lookup(linkedin_url, apollo_key)
+
+    if first:
+        # 1. STRICT NAMED SEARCH WATERFALL
+        # If we know the person, do not cascade to a generic Title Search on failure.
+        active_hunter_key = quota_manager.get_hunter_key() if quota_manager else None
+        if not result and active_hunter_key:
+            result = hunter_named_lookup(domain, first, last, active_hunter_key, company=company_name)
+
+        if not result and quota_manager:
+            snov_creds = quota_manager.get_snov_credentials()
+            # Snov requires both first and last name to avoid 400 Bad Request
+            if snov_creds and last:
+                client_id, client_secret = snov_creds
+                result = snov_named_lookup(domain, first, last, client_id, client_secret)
+
+        # Prospeo named lookup also requires last_name
+        if not result and quota_manager and last:
+            prospeo_key = quota_manager.get_prospeo_key()
+            if prospeo_key:
+                result = prospeo_named_lookup(domain, first, last, prospeo_key, company=company_name)
+
+        # Apollo named lookup (accepts partial last name, good fallback)
+        if not result and quota_manager:
+            apollo_key = quota_manager.get_apollo_key()
+            if apollo_key:
+                result = apollo_named(first, last or "", domain, apollo_key, company=company_name)
+
+    else:
+        # 2. TITLE SEARCH WATERFALL
+        # Only run if the name is completely unknown, to avoid cross-contaminating executives.
+        active_hunter_key = quota_manager.get_hunter_key() if quota_manager else None
+        if not result and active_hunter_key:
+            result = hunter_title_search(domain, segment, active_hunter_key, force_department=force_department)
             
-    if not result and quota_manager and quota_manager.can_use("snov"):
-        result = snov_title_search(domain, segment, SNOV_CLIENT_ID, SNOV_CLIENT_SECRET)
-        if result and result.get("verified"):
-            quota_manager.consume("snov")
-            
-    if not result and quota_manager and quota_manager.can_use("prospeo"):
-        result = prospeo_title_search(domain, segment, PROSPEO_API_KEY)
-        if result and result.get("verified"):
-            quota_manager.consume("prospeo")
+        if not result and quota_manager:
+            snov_creds = quota_manager.get_snov_credentials()
+            if snov_creds:
+                client_id, client_secret = snov_creds
+                result = snov_title_search(domain, segment, client_id, client_secret)
+                
+        if not result and quota_manager:
+            prospeo_key = quota_manager.get_prospeo_key()
+            if prospeo_key:
+                result = prospeo_title_search(domain, segment, prospeo_key)
 
-    if result and result.get("verified"):
+    if result and result.get("email"):
         return {
             **lead,
             "contact_email": result["email"],
-            "contact_name": result["name"],
-            "contact_title": result["title"],
-            "enrichment_source": result["source"],
+            "contact_name": result.get("name", ""),
+            "contact_title": result.get("title", ""),
+            "enrichment_source": result.get("source", "unknown"),
+            "email_verified": result.get("verified", False),
+            "email_confidence": result.get("confidence", 0),
             "reason": "success",
         }
 
-    return {**lead, "contact_email": None, "reason": "no_verified_email_found"}
+    return {**lead, "contact_email": None, "reason": "no_emails_found"}

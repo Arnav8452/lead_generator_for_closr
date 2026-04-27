@@ -10,15 +10,12 @@ from typing import Optional
 from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
-from config import SCRAPER_TIMEOUT
+from config import SCRAPER_TIMEOUT, DEEP_SCRAPE_ENABLED
 from scrapers.base import BaseScraper, RawLead
+from scrapers.polite_scraper import scrape_article
 
 logger = logging.getLogger("closr.scrapers.remote_boards")
 
-# FIX: RemoteOK changed their RSS structure. The old /remote-marketing-jobs.rss
-# endpoint no longer exists — now uses category slugs.
-# WeWorkRemotely marketing RSS is still valid.
-# Added LinkedIn and Greenhouse ATS feeds as higher-signal sources.
 RSS_FEEDS = [
     {
         "name": "WeWorkRemotely",
@@ -26,24 +23,33 @@ RSS_FEEDS = [
     },
     {
         "name": "RemoteOK",
-        # FIX: correct current endpoint
         "url": "https://remoteok.com/remote-jobs.rss",
     },
+    # Note: Add your LinkedIn/Greenhouse feeds here if you have them!
 ]
 
-# FIX: Expanded keyword list — original missed "partnership", "social media",
-# "content creator", "tiktok" which are all active creator budget signals
+# FIX: Actually included the broader terms mentioned in the comments, 
+# plus root words to catch variations.
 CREATOR_KEYWORDS = [
-    "influencer",
+    # The Direct Budget Handlers (High Intent)
+    "influencer", 
     "creator",
-    "ugc",
+    "kol", 
+    "talent manager",
+    "partnerships",
+    "partner marketing",
+    "affiliate",
+    
+    # Platform specific signals
     "tiktok",
-    "partnership",
-    "content creator",
-    "brand ambassador",
-    "social media manager",
+    "youtube",
+    "instagram",
+    
+    # Broader net (Often handle creator budgets in lean startups)
+    "social media",
+    "community manager",
+    "ugc"
 ]
-
 
 class RemoteBoardsScraper(BaseScraper):
     source_name = "remote_boards"
@@ -60,7 +66,6 @@ class RemoteBoardsScraper(BaseScraper):
                 leads.extend(self._parse_feed(feed["name"], feed["url"]))
             except Exception as e:
                 logger.warning(f"Failed to parse {feed['name']}: {e}")
-                # Continue to next feed — don't let one failure kill the scraper
                 continue
 
         logger.info(f"Remote boards: {len(leads)} creator-budget job leads found")
@@ -71,8 +76,6 @@ class RemoteBoardsScraper(BaseScraper):
         response = self.session.get(url, timeout=SCRAPER_TIMEOUT)
         response.raise_for_status()
 
-        # FIX: lxml's xml parser fails silently on malformed RSS (common with RemoteOK).
-        # Try xml first, fall back to html.parser which is more forgiving.
         try:
             soup = BeautifulSoup(response.content, "xml")
             items = soup.find_all("item")
@@ -81,6 +84,7 @@ class RemoteBoardsScraper(BaseScraper):
         except Exception:
             soup = BeautifulSoup(response.content, "html.parser")
             items = soup.find_all("item")
+            
         results: list[RawLead] = []
 
         for item in items:
@@ -94,16 +98,14 @@ class RemoteBoardsScraper(BaseScraper):
 
             title = title_tag.get_text(strip=True)
 
-            # FIX: Match against title AND description — many job boards put the
-            # full role title only in the description, not the RSS <title> tag.
-            # Also lowercase the full check to catch "TikTok" vs "tiktok" etc.
             combined_text = (title + " " + (desc_tag.get_text() if desc_tag else "")).lower()
+            
+            # Filter check: Are any of our keywords in the title/summary?
             if not any(kw in combined_text for kw in CREATOR_KEYWORDS):
                 continue
 
             description = ""
             if desc_tag:
-                # Strip HTML from description, take first 500 chars
                 desc_soup = BeautifulSoup(desc_tag.get_text(), "html.parser")
                 description = desc_soup.get_text(strip=True)[:500]
 
@@ -117,11 +119,24 @@ class RemoteBoardsScraper(BaseScraper):
                     pass
 
             link = link_tag.get_text(strip=True) if link_tag else url
+            
+            raw_text = f"Job Title: {title}\nDescription: {description}"
+            
+            # ── Deep Scrape Injection ──
+            if DEEP_SCRAPE_ENABLED and link:
+                try:
+                    chunks = scrape_article(link)
+                    if chunks:
+                        logger.debug(f"Deep Scrape Success: {link}")
+                        full_text = "\n\n".join(chunks)
+                        raw_text = f"Job Title: {title}\nFull Posting:\n{full_text}"
+                except Exception as e:
+                    logger.debug(f"Deep scrape failed for {link}, falling back to summary: {e}")
 
             results.append(
                 RawLead(
                     source=f"{self.source_name}_{feed_name.lower()}",
-                    raw_text=f"Job Title: {title}\nDescription: {description}",
+                    raw_text=raw_text,
                     url=link,
                     published_date=published,
                 )

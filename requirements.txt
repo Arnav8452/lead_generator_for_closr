@@ -4,8 +4,17 @@ curl-cffi>=0.6.0
 supabase>=2.4.0
 beautifulsoup4>=4.12.0
 apscheduler>=3.10.4
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
 python-dotenv>=1.0.0
 pytest>=7.4.0
 python-dateutil>=2.8.2
+googlenewsdecoder>=0.1.0
+lxml>=4.9.0
+readability-lxml>=0.8.4
+# ── V2: Air-Lock + Sniper + Gauntlet (all CPU-only, VRAM stays for Qwen) ──────
+transformers>=4.40.0
+sentence-transformers>=2.7.0
+torch>=2.2.0
+pandas>=2.2.0
+jellyfish>=1.0.0
+dnspython>=2.6.0
+urllib3<2.0

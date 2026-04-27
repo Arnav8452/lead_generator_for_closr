@@ -1,10 +1,11 @@
 """
-Closr — Supabase Database Client
+Closr — Supabase Database Client (Phase 1: Entity & Signal Model)
 All database interactions are routed through this module.
 Uses the supabase-py client with service-role key for full RLS bypass.
 """
 
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 
 from supabase import create_client, Client
@@ -12,6 +13,28 @@ from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 
 logger = logging.getLogger("closr.db")
+
+# ─────────────────────────────────────────────────────────
+# Company name normalization (mirrors deduplicator.py logic)
+# ─────────────────────────────────────────────────────────
+COMPANY_SUFFIXES = re.compile(
+    r'\b(inc\.?|llc\.?|ltd\.?|co\.?|corp\.?|labs?\.?|studio|'
+    r'limited|incorporated|corporation|group|holdings?|'
+    r'technologies|solutions|enterprises?)\b\.?',
+    re.IGNORECASE,
+)
+
+
+def normalize_company_name(name: str) -> str:
+    """Normalize a company name for deduplication."""
+    if not name:
+        return ""
+    normalized = name.lower().strip()
+    normalized = COMPANY_SUFFIXES.sub("", normalized)
+    normalized = re.sub(r'[.,]+', '', normalized)
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized
+
 
 # ─────────────────────────────────────────────────────────
 # Client Initialization
@@ -35,124 +58,264 @@ def _current_month_year() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
-# ─────────────────────────────────────────────────────────
-# Daily Pool Operations
-# ─────────────────────────────────────────────────────────
-def inject_daily_pool(leads: list[dict]) -> int:
-    """
-    Inject enriched leads into the daily_pool table.
+# ═════════════════════════════════════════════════════════
+# PHASE 1: Entity & Signal Model Operations
+# ═════════════════════════════════════════════════════════
 
-    1. Guard: if no leads are provided, log a warning and return 0.
-       We intentionally do NOT delete stale rows on an empty batch to
-       avoid wiping the pool when scrapers have a bad run.
-    2. Delete rows older than 24 hours.
-    3. Insert new leads. On conflict (brand_name + date), do nothing.
-    4. Return the count of successfully injected rows.
+def upsert_company(company_data: dict) -> int | None:
     """
-    if not leads:
-        logger.warning("inject_daily_pool called with 0 leads — skipping.")
+    Upsert a company record. Deduplicates on name_normalized.
+    Returns the company ID or None on failure.
+
+    Args:
+        company_data: Dict with keys: name, niche, company_size, domain, logo_url
+    """
+    client = _get_client()
+    name = company_data.get("name", "").strip()
+    if not name:
+        logger.warning("upsert_company: Empty company name — skipping.")
+        return None
+
+    name_normalized = normalize_company_name(name)
+    if not name_normalized:
+        return None
+
+    try:
+        result = client.table("companies").upsert(
+            {
+                "name": name,
+                "name_normalized": name_normalized,
+                "domain": company_data.get("domain"),
+                "niche": company_data.get("niche"),
+                "company_size": company_data.get("company_size"),
+                "logo_url": company_data.get("logo_url"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="name_normalized",
+        ).execute()
+
+        if result.data:
+            company_id = result.data[0]["id"]
+            logger.info(f"Upserted company: {name} (id={company_id})")
+            return company_id
+
+    except Exception as e:
+        logger.error(f"Failed to upsert company '{name}': {e}")
+
+    return None
+
+
+def insert_locations(company_id: int, locations: list[dict]) -> int:
+    """
+    Insert location records for a company. ON CONFLICT DO NOTHING.
+    Returns count of successfully inserted locations.
+    """
+    if not locations:
         return 0
 
     client = _get_client()
+    inserted = 0
 
-    # Cleanup leads older than 7 days before injecting new ones
-    try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        client.table("daily_pool").delete().lt("created_at", cutoff).execute()
-        logger.info(f"Cleaned up daily_pool leads older than 7 days (before {cutoff})")
-    except Exception as e:
-        logger.error(f"Stale lead cleanup failed (non-fatal): {e}")
-
-    injected = 0
-    for lead in leads:
+    for loc in locations:
         try:
-            result = (
-                client.table("daily_pool")
-                .upsert(
-                    {
-                        "brand_name": lead["brand_name"],
-                        "niche": lead.get("niche"),
-                        "company_size": lead.get("company_size"),
-                        "intent_signal": lead.get("intent_signal"),
-                        "intent_tier": lead.get("intent_tier"),
-                        "confidence": lead.get("confidence", 0.0),
-                        "icebreaker_pitch": lead.get("icebreaker_pitch"),
-                        "contact_email": lead["contact_email"],
-                        "domain": lead.get("domain"),
-                        "source": lead.get("source"),
-                    },
-                    on_conflict="brand_name",  # dedup on brand for the day
-                    ignore_duplicates=True,
-                )
-                .execute()
-            )
-            if result.data:
-                injected += 1
+            client.table("company_locations").upsert(
+                {
+                    "company_id": company_id,
+                    "location_type": loc.get("type", "unknown"),
+                    "city": loc.get("city"),
+                    "region": loc.get("region"),
+                    "country": loc.get("country"),
+                    "raw_string": loc.get("raw"),
+                    "source_url": loc.get("source_url"),
+                },
+                on_conflict="company_id,location_type,city,country",
+                ignore_duplicates=True,
+            ).execute()
+            inserted += 1
         except Exception as e:
-            logger.error(f"Failed to inject lead '{lead.get('brand_name')}': {e}")
+            logger.error(f"Failed to insert location for company {company_id}: {e}")
 
-    logger.info(f"Injected {injected}/{len(leads)} leads into daily_pool.")
-    return injected
+    return inserted
 
 
-# ─────────────────────────────────────────────────────────
-# Unenriched Leads (manual review queue)
-# ─────────────────────────────────────────────────────────
-def save_unenriched(lead: dict, reason: str, domain: str | None) -> None:
+def insert_signal(
+    company_id: int,
+    signal_data: dict,
+    embedding: list[float] | None = None,
+    raw_text: str | None = None,
+) -> int | None:
     """
-    Persist a lead that passed extraction/validation but could not be
-    enriched with a verified email. These are stored for manual outreach.
+    Insert a signal record with optional vector embedding.
+    Returns the signal ID or None on failure.
     """
     client = _get_client()
+
+    row = {
+        "company_id": company_id,
+        "signal_type": signal_data.get("type", "unknown"),
+        "headline": signal_data.get("headline"),
+        "summary": signal_data.get("summary"),
+        "source_url": signal_data.get("source_url"),
+        "source_name": signal_data.get("source_name"),
+        "event_date": signal_data.get("event_date"),
+        "raw_text": (raw_text or "")[:3000],
+    }
+
+    # pgvector expects the embedding as a list/array
+    if embedding:
+        row["embedding"] = embedding
+
     try:
-        client.table("unenriched_leads").insert(
-            {
-                "brand_name": lead.get("brand_name"),
-                "niche": lead.get("niche"),
-                "intent_signal": lead.get("intent_signal"),
-                "confidence": lead.get("confidence", 0.0),
-                "domain": domain,
-                "reason": reason,
-                "source": lead.get("source"),
-                "raw_text": lead.get("raw_text", "")[:2000],  # cap storage
-            }
-        ).execute()
-        logger.info(f"Saved unenriched lead: {lead.get('brand_name')} — {reason}")
+        result = client.table("company_signals").insert(row).execute()
+        if result.data:
+            signal_id = result.data[0]["id"]
+            logger.debug(
+                f"Inserted signal for company {company_id}: "
+                f"{signal_data.get('headline', 'N/A')}"
+            )
+            return signal_id
     except Exception as e:
-        logger.error(f"Failed to save unenriched lead: {e}")
+        logger.error(f"Failed to insert signal for company {company_id}: {e}")
+
+    return None
 
 
-# ─────────────────────────────────────────────────────────
-# Deduplication Check
-# ─────────────────────────────────────────────────────────
-def check_duplicate(brand_name: str) -> bool:
+def upsert_proximal_contact(company_id: int, contact: dict) -> int | None:
     """
-    Return True if a lead with this brand_name already exists in today's
-    daily_pool. Scoped to today (UTC) so brands can re-enter the pool
-    on subsequent days (e.g., Series B after Series A).
+    Upsert a proximal contact. Deduplicates on (company_id, full_name, job_title).
+    Returns the contact ID or None on failure.
+    """
+    client = _get_client()
+    full_name = (contact.get("name") or "").strip()
+    if not full_name:
+        return None
+
+    try:
+        result = client.table("proximal_contacts").upsert(
+            {
+                "company_id": company_id,
+                "full_name": full_name,
+                "job_title": contact.get("title"),
+                "linkedin_url": contact.get("linkedin_url"),
+                "email": contact.get("email"),
+                "email_verified": contact.get("email_verified", False),
+                "email_source": contact.get("email_source"),
+                "proximity_rank": contact.get("proximity_rank", 99),
+                "source_url": contact.get("source_url"),
+                "source_name": contact.get("source_name"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="company_id,full_name,job_title",
+        ).execute()
+
+        if result.data:
+            contact_id = result.data[0]["id"]
+            logger.debug(f"Upserted contact: {full_name} (id={contact_id})")
+            return contact_id
+
+    except Exception as e:
+        logger.error(f"Failed to upsert contact '{full_name}': {e}")
+
+    return None
+
+
+def update_contact_email(
+    contact_id: int,
+    email: str,
+    verified: bool,
+    source: str,
+) -> None:
+    """Update a proximal contact's email after enrichment."""
+    client = _get_client()
+    try:
+        client.table("proximal_contacts").update(
+            {
+                "email": email,
+                "email_verified": verified,
+                "email_source": source,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", contact_id).execute()
+        logger.info(f"Updated contact {contact_id} email: {email} (verified={verified})")
+    except Exception as e:
+        logger.error(f"Failed to update contact {contact_id} email: {e}")
+
+
+def update_contact_linkedin(contact_id: int, linkedin_url: str) -> None:
+    """Update a proximal contact's LinkedIn URL after resolution."""
+    client = _get_client()
+    try:
+        client.table("proximal_contacts").update(
+            {
+                "linkedin_url": linkedin_url,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", contact_id).execute()
+        logger.debug(f"Updated contact {contact_id} LinkedIn: {linkedin_url}")
+    except Exception as e:
+        logger.error(f"Failed to update contact {contact_id} LinkedIn: {e}")
+
+
+def update_company_domain(company_id: int, domain: str) -> None:
+    """Update a company's domain after Clearbit resolution."""
+    client = _get_client()
+    try:
+        client.table("companies").update(
+            {
+                "domain": domain,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", company_id).execute()
+    except Exception as e:
+        logger.error(f"Failed to update company {company_id} domain: {e}")
+
+
+def insert_unresolved_email(company_id: int, email: str, harness_output: dict) -> None:
+    """
+    Park an email discovered by the ReAct harness that lacks a clear human owner.
     """
     client = _get_client()
     try:
-        today_start = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        # Use upsert to avoid violating the (company_id, full_name, job_title) constraint
+        # if multiple unresolved emails are found for the same company over time.
+        client.table("proximal_contacts").upsert(
+            {
+                "company_id": company_id,
+                "full_name": "Unknown",
+                "job_title": "Unknown",
+                "email": email,
+                "email_source": "react_harness_unresolved",
+                "proximity_rank": 99,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="company_id,full_name,job_title",
+        ).execute()
+        logger.info(f"Parked unresolved email for company {company_id}: {email}")
+    except Exception as e:
+        logger.error(f"Failed to park unresolved email for company {company_id}: {e}")
+
+
+def get_contacts_for_company(company_id: int) -> list[dict]:
+    """Fetch all proximal contacts for a company, ordered by proximity rank."""
+    client = _get_client()
+    try:
         result = (
-            client.table("daily_pool")
-            .select("id")
-            .eq("brand_name", brand_name)
-            .gte("created_at", today_start)
+            client.table("proximal_contacts")
+            .select("*")
+            .eq("company_id", company_id)
+            .order("proximity_rank", desc=False)
             .execute()
         )
-        return len(result.data) > 0
+        return result.data or []
     except Exception as e:
-        logger.error(f"Duplicate check failed for '{brand_name}': {e}")
-        # Fail-open: if we can't check, assume not duplicate to avoid data loss
-        return False
+        logger.error(f"Failed to fetch contacts for company {company_id}: {e}")
+        return []
 
 
-# ─────────────────────────────────────────────────────────
-# Enrichment Usage Tracking
-# ─────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════
+# Enrichment Usage Tracking (kept from Phase 0)
+# ═════════════════════════════════════════════════════════
+
 def get_enricher_usage(enricher: str) -> int:
     """
     Return how many API calls this enricher has consumed in the current
@@ -179,15 +342,10 @@ def get_enricher_usage(enricher: str) -> int:
 def increment_enricher_usage(enricher: str) -> None:
     """
     Atomically increment the monthly usage counter for an enricher by 1.
-    Uses upsert to create-or-increment in a single operation, preventing
-    race conditions when concurrent pipeline runs fire.
     """
     client = _get_client()
     month = _current_month_year()
     try:
-        # Atomic upsert: insert with usage_count=1 if new,
-        # or increment existing row in one operation.
-        # First, try to get current value and upsert atomically.
         current = get_enricher_usage(enricher)
         client.table("enrichment_usage").upsert(
             {
@@ -201,14 +359,12 @@ def increment_enricher_usage(enricher: str) -> None:
         logger.error(f"Failed to increment usage for '{enricher}': {e}")
 
 
-# ─────────────────────────────────────────────────────────
-# Pipeline Run Logging
-# ─────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════
+# Pipeline Run Logging (kept from Phase 0)
+# ═════════════════════════════════════════════════════════
+
 def log_pipeline_start() -> int | None:
-    """
-    Create a new pipeline_runs entry with status='running'.
-    Returns the row ID for later update.
-    """
+    """Create a new pipeline_runs entry with status='running'."""
     client = _get_client()
     try:
         result = (
@@ -257,25 +413,27 @@ def log_pipeline_finish(
 
 def get_pool_stats() -> dict:
     """
-    Return summary stats for the /health endpoint:
-    - total leads in current pool
-    - total unenriched leads
-    - last pipeline run info
+    Return summary stats for the /health endpoint.
+    Updated for Phase 1 schema.
     """
     client = _get_client()
     stats: dict = {
-        "pool_size": 0,
-        "unenriched_count": 0,
+        "companies_count": 0,
+        "signals_count": 0,
+        "contacts_count": 0,
+        "contacts_with_email": 0,
+        "contacts_with_linkedin": 0,
         "last_run": None,
     }
     try:
-        pool = client.table("daily_pool").select("id", count="exact").execute()
-        stats["pool_size"] = pool.count or 0
+        companies = client.table("companies").select("id", count="exact").execute()
+        stats["companies_count"] = companies.count or 0
 
-        unenriched = (
-            client.table("unenriched_leads").select("id", count="exact").execute()
-        )
-        stats["unenriched_count"] = unenriched.count or 0
+        signals = client.table("company_signals").select("id", count="exact").execute()
+        stats["signals_count"] = signals.count or 0
+
+        contacts = client.table("proximal_contacts").select("id", count="exact").execute()
+        stats["contacts_count"] = contacts.count or 0
 
         last_run = (
             client.table("pipeline_runs")

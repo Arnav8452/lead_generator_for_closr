@@ -25,3 +25,12 @@ htmlcov/
 # ── OS ─────────────────────────────────────────────────
 Thumbs.db
 .DS_Store
+
+# ── Closr Pipeline ──────────────────────────────────────
+api_quotas.json
+output.txt
+*.log
+scratch_*.py
+test_*.py
+debug_*.py
+implementation_plan.md

@@ -11,8 +11,9 @@ from typing import Optional
 from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
-from config import SCRAPER_TIMEOUT
+from config import SCRAPER_TIMEOUT, DEEP_SCRAPE_ENABLED
 from scrapers.base import BaseScraper, RawLead
+from scrapers.polite_scraper import scrape_article
 
 logger = logging.getLogger("closr.scrapers.podcast_sponsors")
 
@@ -37,19 +38,28 @@ URL_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# FIX: Expanded sponsor signals. "sponsor" and "promo" appear in URLs but
-# "discount" rarely does. Added common sponsor URL patterns.
+# FIX: Killed generic e-commerce words (deal, shop, coupon) which pull false positives.
+# Shifted focus to dedicated podcast attribution funnels, UTM parameters, 
+# and high-budget vanity subdomains.
+
 SPONSOR_KEYWORDS = [
-    "sponsor",
-    "promo",
+    # 1. Direct Podcast Attribution (The highest signal possible)
+    "/podcast",            # e.g., magicspoon.com/podcast
+    "utm_source=podcast",
+    "utm_medium=audio",
+    "utm_campaign=podcast",
+    "/pages/podcast",      # Standard Shopify custom landing page route
+    
+    # 2. High-Budget Vanity Subdomains (Used by brands scaling creator ads)
+    "try.",      # e.g., try.athleticgreens.com/huberman
+    "go.",       # e.g., go.manscaped.com
+    "join.",     # e.g., join.whoop.com
+    "partners.", # e.g., partners.betterhelp.com
+
+    # 3. Tightened Promo Indicators (Avoiding generic noise)
     "/code/",
-    "discount",
-    "offer",
-    "deal",
-    "coupon",
-    "try.",       # e.g. try.athleticgreens.com
-    "get.",       # e.g. get.helix.com
-    "shop.",      # e.g. shop.ysebeauty.com
+    "/promo/",
+    "/vip/"
 ]
 
 # Cap episodes to process per feed to avoid massive RSS pulls
@@ -129,6 +139,8 @@ class PodcastSponsorScraper(BaseScraper):
             # Deduplicate sponsor URLs for clean output
             unique_sponsors = list(dict.fromkeys(sponsor_urls))[:10]
 
+            episode_link = link_tag.get_text(strip=True) if link_tag else feed_url
+
             raw_text = (
                 f"Podcast: {feed_url}\n"
                 f"Episode: {title}\n"
@@ -136,11 +148,22 @@ class PodcastSponsorScraper(BaseScraper):
                 "\n".join(f"  - {url}" for url in unique_sponsors)
             )
 
-            leads.append(
+            # ── Deep Scrape Injection ──
+            if DEEP_SCRAPE_ENABLED and episode_link and episode_link != feed_url:
+                try:
+                    chunks = scrape_article(episode_link)
+                    if chunks:
+                        logger.debug(f"Deep Scrape Success: {episode_link}")
+                        full_article = "\n\n".join(chunks)
+                        raw_text += f"\n\nFull Show Notes:\n{full_article}"
+                except Exception as e:
+                    logger.debug(f"Deep scrape failed for podcast {episode_link}: {e}")
+
+            results.append(
                 RawLead(
                     source=self.source_name,
                     raw_text=raw_text,
-                    url=link_tag.get_text(strip=True) if link_tag else feed_url,
+                    url=episode_link,
                     published_date=published,
                 )
             )

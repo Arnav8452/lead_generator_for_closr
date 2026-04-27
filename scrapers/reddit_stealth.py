@@ -14,30 +14,47 @@ import logging
 import time
 import urllib.parse
 
+from bs4 import BeautifulSoup
 from curl_cffi import requests
 
-from config import SCRAPER_TIMEOUT
+from config import SCRAPER_TIMEOUT, DEEP_SCRAPE_ENABLED
 from scrapers.base import BaseScraper, RawLead
+from scrapers.polite_scraper import scrape_article
 
 logger = logging.getLogger("closr.scrapers.reddit_stealth")
 
 HEADERS = {"User-Agent": "python:closr_stealth_scraper:v1.0 (by /u/arnav_chandra)"}
 
 # FIX: Split into focused per-intent queries.
-# Reddit's search engine silently returns 0 results for long multi-clause boolean
-# queries with mixed AND/OR logic — it doesn't support them reliably.
-# Separate short queries per signal type work far better.
+# Reddit search drops complex booleans. We use short, natural-language 
+# complaint fragments and exact-match quotes that founders actually type.
 SEARCH_QUERIES = [
-    # Pain signal: CAC/ROAS distress
-    "CAC ROAS ad spend",
-    # Direct hiring signal
-    "hiring UGC creator",
-    # Collaboration signal
-    "looking for influencer collab",
+    # 1. The Active Distress Signals (Ad platforms failing them)
+    '"Facebook ads" expensive',
+    '"CAC" getting too high',
+    '"ROAS" dead',
+    '"burning money" ads',
+    '"Facebook ads" killing',
+
+    # 2. The Discovery/Pivot Signals (Founders asking for alternatives)
+    '"anyone tried influencer marketing"',
+    '"switching to UGC"',
+    '"worth it" sponsor',
+    '"how to find" UGC',
+
+    # 3. Direct Hiring & Collab Signals (Ready to spend)
+    '"looking for UGC"',
+    '"sponsor a newsletter"',
+    '"sponsoring YouTube"',
+    '"need influencers"',
+    '"creator partnerships"'
 ]
 
-# Target subreddits where founders express marketing pain or seek creators
-TARGET_SUBREDDITS = "SaaS+marketing+DTC+Entrepreneur"
+# ── Target Subreddits ────────────────────────────────
+# Killed 'marketing' (too many agencies). 
+# Added 'Shopify', 'startups', and 'ecommerce' which are absolute goldmines 
+# for DTC founders complaining about Zuckerberg taking all their margins.
+TARGET_SUBREDDITS = "SaaS+Entrepreneur+ecommerce+startups+Shopify+DTC"
 
 # Cap to prevent rate-limiting on residential IPs
 SEARCH_LIMIT = 20
@@ -129,6 +146,23 @@ class RedditStealthScraper(BaseScraper):
                         f"Body: {selftext[:1000]}\n"
                         f"\nTop Comments:{comments_text}"
                     )
+
+                    # ── Deep Scrape Injection ──
+                    if DEEP_SCRAPE_ENABLED:
+                        # Find first external URL in the post or comments
+                        import re
+                        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', full_context)
+                        external_urls = [u for u in urls if "reddit.com" not in u]
+                        if external_urls:
+                            target_url = external_urls[0]
+                            try:
+                                chunks = scrape_article(target_url)
+                                if chunks:
+                                    logger.debug(f"Deep Scrape Success (Reddit external link): {target_url}")
+                                    full_article = "\n\n".join(chunks)
+                                    full_context += f"\n\nFull External Context ({target_url}):\n{full_article}"
+                            except Exception as e:
+                                logger.debug(f"Deep scrape failed for Reddit external link {target_url}: {e}")
 
                     leads.append(
                         RawLead(
