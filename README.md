@@ -271,33 +271,34 @@ elif email and (first_name or last_name):
 
 ---
 
-## 📈 Live Run Results & Output Snapshot
+## 🗃️ Sample Extracted Data (Sanitized)
 
-Closr is built for continuous background execution. Below are the actual metrics from a recent 90-minute autonomous run on a local RTX 3050, resulting in zero API inference costs.
+The system outputs a normalized dataset directly to Supabase. PII (emails and full names) have been redacted for this public repository — this is a raw snapshot of what the Extraction Fortress + Enrichment Waterfall produce on a live run.
 
-**Terminal Execution Log:**
-```text
-[closr.main] INFO: ═══ PIPELINE COMPLETE ═══
-  Scraped:       241 (Raw DOMs fetched)
-  Extracted:     56  (Surviving high-intent chunks)
-  Companies:     42  (Unique resolved entities)
-  Signals:       42  (Captured buying intents)
-  Contacts:      106 (Raw identities found)
-  Emails Found:  27  (Verified through waterfall)
-  LinkedIn:      97  (Profiles matched)
-  Time:          5538.9s (~1.5 hours)
+| Brand | Signal | Intent Summary | Contact Found | Verified Email |
+|---|---|---|---|---|
+| Under Armour | `hiring` | Director, Digital Commerce Revenue Ops — alignment across departments to drive revenue growth and P&L performance | Lauren H. *(Director, Ops, Office of the CEO)* | `l****@underarmour.com` ✅ |
+| Amazon | `hiring` | Account Exec for Creator Ad Partnerships — strategic advising, managing C-suite agency relationships | Allie O. *(Director of Marketing)* | `a*****@amazon.com` ✅ |
+| Bubble | `hiring` | Director of Influencer Marketing — expanding creator marketing efforts in New York, NY | Tatiana A. *(VP of Marketing)* | `t*******@bubble.io` ✅ |
+| Dae Hair | `hiring` | Director, Influencer Marketing — growing brand through social and creator partnerships | Amber F. *(Founder)* | `a****@daehair.com` ✅ |
+| Sanofi | `hiring` | Thought Leader Liaison for rare blood disorders — engaging KOLs and HCPs on brand strategy | *Agent: routing to OSINT loop* | ⏳ Pending ReAct |
+| INVOLVE | `hiring` | Digital Marketing Manager — paid campaigns, social media oversight, content creation | *Agent: routing to OSINT loop* | ⏳ Pending ReAct |
 
-🗃️ Sample Extracted Data (Sanitized)
-The system outputs a normalized dataset directly to Supabase. PII (emails and full names) have been redacted for this public repository, but here is a raw snapshot of what Qwen 2.5 and the Enrichment Waterfall produce:
+> Contacts routed to **Pending ReAct** were not resolved by the Waterfall (Prospeo → Apollo → Hunter → Snov cascade) and handed off to the autonomous Qwen 2.5 7B ReAct harness for OSINT-based resolution.
 
-Brand,Signal,Intent Summary,Contact Found,Verified Email
-Under Armour,hiring,"Director, Digital Commerce Revenue Ops. Alignment across multiple departments to drive revenue growth...","Lauren H. (Director, Ops, Office Of The CEO)",l****@underarmour.com (✅ True)
-Amazon,hiring,"Account Exec for Creator Ad Partnerships. Strategic advising, managing relationships with C-suite agencies...",Allie O. (Director of Marketing),a*****@amazon.com (✅ True)
-Sanofi,hiring,Thought Leader Liaison for rare blood disorders... engaging with healthcare professionals and KOLs.,[Agent: Routing to OSINT loop],Pending ReAct
-INVOLVE,hiring,"Digital Marketing Manager to lead strategic insights, paid campaigns, and oversee social media initiatives.",[Agent: Routing to OSINT loop],Pending ReAct
+---
 
-Note on Safety: The system dynamically routes low-proximity leads or missing contacts (like Sanofi and INVOLVE above) straight to the autonomous ReAct agent to perform deep OSINT searches, preventing wasted credits on blind domain searches.
-```
+### 📊 Pipeline Run Stats *(single execution)*
+
+| Metric | Value |
+|---|---|
+| Signals scraped | 241 |
+| Passed extraction (all 4 gates) | 56 — 23% pass-through |
+| Companies upserted | 42 |
+| Contacts mapped | 106 — avg 2.5 per company |
+| Emails verified | 27 |
+| LinkedIn profiles found | 97 |
+| Total runtime | ~92 minutes |
 
 ## 📦 Setup
 
