@@ -271,6 +271,15 @@ elif email and (first_name or last_name):
 
 ---
 
+Run stats (single pipeline execution):
+  Sources scraped:    241 signals
+  Passed extraction:  56  (23% pass-through rate)
+  Companies:          42
+  Contacts mapped:    106 (avg 2.5 / company)
+  Emails verified:    27
+  LinkedIn profiles:  97
+  Runtime:            ~92 minutes
+
 ## 📦 Setup
 
 **1. Requirements**
