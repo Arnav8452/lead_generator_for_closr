@@ -271,14 +271,33 @@ elif email and (first_name or last_name):
 
 ---
 
-Run stats (single pipeline execution):
-  Sources scraped:    241 signals
-  Passed extraction:  56  (23% pass-through rate)
-  Companies:          42
-  Contacts mapped:    106 (avg 2.5 / company)
-  Emails verified:    27
-  LinkedIn profiles:  97
-  Runtime:            ~92 minutes
+## 📈 Live Run Results & Output Snapshot
+
+Closr is built for continuous background execution. Below are the actual metrics from a recent 90-minute autonomous run on a local RTX 3050, resulting in zero API inference costs.
+
+**Terminal Execution Log:**
+```text
+[closr.main] INFO: ═══ PIPELINE COMPLETE ═══
+  Scraped:       241 (Raw DOMs fetched)
+  Extracted:     56  (Surviving high-intent chunks)
+  Companies:     42  (Unique resolved entities)
+  Signals:       42  (Captured buying intents)
+  Contacts:      106 (Raw identities found)
+  Emails Found:  27  (Verified through waterfall)
+  LinkedIn:      97  (Profiles matched)
+  Time:          5538.9s (~1.5 hours)
+
+🗃️ Sample Extracted Data (Sanitized)
+The system outputs a normalized dataset directly to Supabase. PII (emails and full names) have been redacted for this public repository, but here is a raw snapshot of what Qwen 2.5 and the Enrichment Waterfall produce:
+
+Brand,Signal,Intent Summary,Contact Found,Verified Email
+Under Armour,hiring,"Director, Digital Commerce Revenue Ops. Alignment across multiple departments to drive revenue growth...","Lauren H. (Director, Ops, Office Of The CEO)",l****@underarmour.com (✅ True)
+Amazon,hiring,"Account Exec for Creator Ad Partnerships. Strategic advising, managing relationships with C-suite agencies...",Allie O. (Director of Marketing),a*****@amazon.com (✅ True)
+Sanofi,hiring,Thought Leader Liaison for rare blood disorders... engaging with healthcare professionals and KOLs.,[Agent: Routing to OSINT loop],Pending ReAct
+INVOLVE,hiring,"Digital Marketing Manager to lead strategic insights, paid campaigns, and oversee social media initiatives.",[Agent: Routing to OSINT loop],Pending ReAct
+
+Note on Safety: The system dynamically routes low-proximity leads or missing contacts (like Sanofi and INVOLVE above) straight to the autonomous ReAct agent to perform deep OSINT searches, preventing wasted credits on blind domain searches.
+```
 
 ## 📦 Setup
 
