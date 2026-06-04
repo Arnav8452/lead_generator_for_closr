@@ -300,6 +300,8 @@ The system outputs a normalized dataset directly to Supabase. PII (emails and fu
 | LinkedIn profiles found | 97 |
 | Total runtime | ~92 minutes |
 
+**Test runs results are given as csv files**
+
 ## 📦 Setup
 
 **1. Requirements**
